@@ -1,0 +1,6 @@
+{
+    "project_root": "/home/jaky/workspace/Ssenssorss",
+    "files": [
+        "src/devices/lidars/LDROBOT_D500/src/d500_parser.cpp"
+    ]
+}

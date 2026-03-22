@@ -3,13 +3,4 @@ __pycache__
 build
 dist
 *.egg-info
-*.pyc
-*.pyo
-*.pyd
-*.log
-*.bak
-*.swp
-.DS_Store
-.idea
-.vscode
 *.env
