@@ -81,8 +81,17 @@ def run_from_config(config_path: str):
         if not os.path.exists(abs_path):
             print(f"  SKIPPING: File not found: {abs_path}")
             continue
-            
-        start_agent(abs_path)
+
+        try:
+            start_agent(abs_path)
+        except Exception as e:
+            print(f"\n[ERROR] Agent failed for {abs_path}: {e}")
+            print("  Continuing with next file...\n")
+
+        if i < len(files):
+            print("\n[Cooldown] Waiting 60s before next file to avoid rate limits...")
+            import time
+            time.sleep(60)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

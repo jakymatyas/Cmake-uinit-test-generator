@@ -103,8 +103,9 @@ def write_file(file_path: str, content: str) -> str:
 
 def read_project_context(target_cpp_path: str) -> str:
     """
-    Reads the target C++ file, its corresponding header, and the root CMakeLists.txt.
-    Call this first to understand the code and how to link against it.
+    Reads the target C++ file, its corresponding header, the root CMakeLists.txt,
+    and any existing unit test file for this target.
+    Call this first to understand the code, how to link against it, and what tests already exist.
     """
     context = ""
     
@@ -138,15 +139,32 @@ def read_project_context(target_cpp_path: str) -> str:
     if os.path.exists("CMakeLists.txt"):
         with open("CMakeLists.txt", 'r') as f:
             context += f"--- Root CMakeLists.txt ---\n{f.read()}\n\n"
-            
+
+    target_dir = os.path.dirname(target_cpp_path)
+    name_without_ext = os.path.splitext(os.path.basename(target_cpp_path))[0]
+    if os.path.basename(target_dir) == 'src':
+        parent_dir = os.path.dirname(target_dir)
+    else:
+        parent_dir = target_dir
+    
+    test_filepath = os.path.join(parent_dir, 'utest', f"UT_{name_without_ext}.cpp")
+    if os.path.exists(test_filepath):
+        with open(test_filepath, 'r') as f:
+            context += f"--- EXISTING TEST FILE: {test_filepath} ---\n{f.read()}\n\n"
+    else:
+        context += f"No existing test file found at {test_filepath}.\n\n"
+
     return context
 
-def write_test_file(target_cpp_path: str, cpp_test_content: str, cmake_content_to_append: str) -> str:
+def write_test_file(target_cpp_path: str, cpp_test_content: str, link_libraries: str) -> str:
     """
-    Writes a unit test file to the 'utest' directory next to the 'src' directory.
+    Writes a unit test .cpp file to the 'utest' directory next to the 'src' directory.
     Automatically prefixes the filename with 'UT_'.
-    Manages utest/CMakeLists.txt: replaces existing config for this target or appends if new.
+    Manages a unified utest/CMakeLists.txt: one executable containing ALL test .cpp files.
+    The link_libraries parameter is a space-separated list of CMake targets to link against
+    (e.g., "core sensordata utils"). GTest libraries are always included automatically.
     """
+    import re as _re
 
     target_dir = os.path.dirname(target_cpp_path)
     base_name = os.path.basename(target_cpp_path)
@@ -165,29 +183,56 @@ def write_test_file(target_cpp_path: str, cpp_test_content: str, cmake_content_t
     
     with open(test_filepath, 'w') as f:
         f.write(cpp_test_content)
-        
+
     cmake_filepath = os.path.join(utest_dir, "CMakeLists.txt")
-    marker = f"# --- Auto-generated test for {base_name} ---"
-    new_block = f"{marker}\n{cmake_content_to_append}"
+    project_name = os.path.basename(parent_dir) + "_utest"
+
+    test_files = sorted(f for f in os.listdir(utest_dir) if f.startswith("UT_") and f.endswith(".cpp"))
+    new_libs = set(link_libraries.split()) if link_libraries.strip() else set()
 
     if os.path.exists(cmake_filepath):
         with open(cmake_filepath, 'r') as f:
-            existing = f.read()
-
-        if marker in existing:
-            # Replace the existing block for this target
-            import re
-            pattern = re.escape(marker) + r'.*?(?=\n# --- Auto-generated test for |\Z)'
-            new_content = re.sub(pattern, new_block, existing, count=1, flags=re.DOTALL)
-            with open(cmake_filepath, 'w') as f:
-                f.write(new_content)
+            existing_cmake = f.read()
+        lib_match = _re.search(r'target_link_libraries\(\$\{PROJECT_NAME\}\s+PRIVATE\s+(.*?)\)', existing_cmake, _re.DOTALL)
+        if lib_match:
+            existing_libs = set(lib_match.group(1).split())
         else:
-            with open(cmake_filepath, 'a') as f:
-                f.write(f"\n\n{new_block}")
-    else:
-        with open(cmake_filepath, 'w') as f:
-            f.write(f"# Auto-generated CMakeLists for {os.path.basename(parent_dir)} tests\n\n")
-            f.write(new_block)
+            existing_libs = set()
+        new_libs = existing_libs | new_libs
+
+    gtest_libs = {"GTest::GTest", "GTest::gmock", "GTest::gmock_main", "GTest::Main"}
+    all_libs = sorted(gtest_libs) + sorted(new_libs - gtest_libs)
+
+    tests_list = "\n".join(f"    {f}" for f in test_files)
+    libs_list = "\n        ".join(all_libs)
+
+    cmake_content = f"""cmake_minimum_required(VERSION 3.20)
+
+project({project_name})
+
+enable_testing()
+
+find_package(GTest REQUIRED)
+
+set(tests
+{tests_list}
+)
+
+add_executable(${{PROJECT_NAME}} ${{tests}})
+
+target_link_libraries(${{PROJECT_NAME}} PRIVATE
+        {libs_list}
+)
+
+target_include_directories(${{PROJECT_NAME}} PUBLIC
+        ${{CMAKE_SOURCE_DIR}}
+)
+
+add_test(NAME ${{PROJECT_NAME}} COMMAND ${{PROJECT_NAME}})
+"""
+
+    with open(cmake_filepath, 'w') as f:
+        f.write(cmake_content)
 
     # Ensure the parent CMakeLists.txt includes the utest subdirectory
     parent_cmake = os.path.join(parent_dir, "CMakeLists.txt")
@@ -196,12 +241,12 @@ def write_test_file(target_cpp_path: str, cpp_test_content: str, cmake_content_t
             parent_content = f.read()
         if "add_subdirectory(utest)" not in parent_content:
             with open(parent_cmake, 'a') as f:
-                f.write("\n\nadd_subdirectory(utest)\n")
-            result_msg = f"Successfully wrote {test_filepath}, appended to {cmake_filepath}, and added add_subdirectory(utest) to {parent_cmake}"
+                f.write("\n\nif(BUILD_TESTING)\n    add_subdirectory(utest)\nendif()\n")
+            result_msg = f"Successfully wrote {test_filepath}, regenerated {cmake_filepath}, and added add_subdirectory(utest) to {parent_cmake}"
         else:
-            result_msg = f"Successfully wrote {test_filepath} and appended to {cmake_filepath} (add_subdirectory(utest) already present in {parent_cmake})"
+            result_msg = f"Successfully wrote {test_filepath} and regenerated {cmake_filepath} (add_subdirectory(utest) already present in {parent_cmake})"
     else:
-        result_msg = f"Successfully wrote {test_filepath} and appended to {cmake_filepath}. WARNING: No CMakeLists.txt found at {parent_cmake} — you may need to manually add add_subdirectory(utest)."
+        result_msg = f"Successfully wrote {test_filepath} and regenerated {cmake_filepath}. WARNING: No CMakeLists.txt found at {parent_cmake} — you may need to manually add add_subdirectory(utest)."
 
     return result_msg
 
@@ -335,9 +380,11 @@ def search_codebase(file_pattern: str, text_query: str = "", root_dir: str = "."
         
     return f"Search Results:\n{result_str}"
 
-def run_test_executable(test_target_name: str, build_dir: str = "build/ubuntu-RelWithDebInfo") -> str:
+def run_test_executable(test_target_name: str, gtest_filter: str = "", build_dir: str = "build/ubuntu-RelWithDebInfo") -> str:
     """
     Locates and executes the compiled test binary on Ubuntu/Linux.
+    Use gtest_filter to run only specific test suites (e.g., "FrameSchedulerTest.*").
+    This is critical when other tests in the unified executable crash (segfault).
     Captures the output so the agent can see if assertions passed, failed, or segfaulted.
     """
     executable_path = None
@@ -354,23 +401,34 @@ def run_test_executable(test_target_name: str, build_dir: str = "build/ubuntu-Re
         st = os.stat(executable_path)
         os.chmod(executable_path, st.st_mode | stat.S_IEXEC)
 
+        cmd = [executable_path]
+        if gtest_filter:
+            cmd.append(f"--gtest_filter={gtest_filter}")
+
         process = subprocess.run(
-            [executable_path],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=1 # 1 second
+            timeout=30
         )
         
-        output = f"Test Executed: {executable_path}\nExit Code: {process.returncode}\n\n"
-        output += "--- STDOUT ---\n" + process.stdout + "\n"
+        output = f"Test Executed: {executable_path}\nExit Code: {process.returncode}\n"
+        if gtest_filter:
+            output += f"Filter: {gtest_filter}\n"
+        output += "\n--- STDOUT ---\n" + process.stdout + "\n"
         
         if process.stderr:
             output += "--- STDERR ---\n" + process.stderr + "\n"
             
         if process.returncode == 0:
             return "SUCCESS: All tests passed!\n" + output
+        elif process.returncode < 0:
+            crash_msg = f"CRASH: Test executable killed by signal {-process.returncode} (likely segfault).\n"
+            if not gtest_filter:
+                crash_msg += "TIP: Use gtest_filter to isolate your test suite (e.g., 'MyTestSuite.*') to avoid crashes from other tests.\n"
+            return crash_msg + output
         else:
-            return "FAILURE: Tests failed or crashed.\n" + output
+            return "FAILURE: Tests failed.\n" + output
             
     except subprocess.TimeoutExpired:
         return f"Error: Test execution timed out after 30 seconds. You might have an infinite loop in {test_target_name}."
